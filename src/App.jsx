@@ -5,7 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 import * as THREE from 'three';
 
 // --- 0. VERSIONNING ---
-const APP_VERSION = "v0.4.0 (Prism & Gravity)";
+const APP_VERSION = "v0.5.0 (Gravity Fix & Guides)";
 
 // --- 1. CONFIGURATION MATÉRIAUX ---
 const MATERIALS = {
@@ -15,7 +15,7 @@ const MATERIALS = {
   brick: { color: '#A52A2A', name: 'Brique' },
   water: { color: '#4FC3F7', name: 'Eau', opacity: 0.6 },
   grass: { color: '#4CAF50', name: 'Herbe' },
-  roof:   { color: '#8B0000', name: 'Tuile' }, // Nouveau pour le toit
+  roof:   { color: '#8B0000', name: 'Tuile' },
 };
 
 // --- 2. CONFIGURATION DES FORMES ---
@@ -23,31 +23,20 @@ const SHAPES = {
   cube: { name: 'Cube', heightBase: 1 },
   slab: { name: 'Dalle (0.5)', heightBase: 0.5 },
   column: { name: 'Colonne', heightBase: 1 },
-  slope: { name: 'Toit (Prisme)', heightBase: 1 }, // Renommé
+  slope: { name: 'Toit (Prisme)', heightBase: 1 },
 };
 
 // --- UTILITAIRES ---
 const getRotation = (rot) => Array.isArray(rot) ? rot : [0, rot || 0, 0];
 const getScale = (s) => Array.isArray(s) ? s : [1, 1, 1];
 
-// --- GÉOMÉTRIE PRISME (TRIANGLE EXTRUDÉ) ---
-// On crée une forme sur mesure pour remplacer la pyramide
 const createPrismGeometry = () => {
   const shape = new THREE.Shape();
-  // On dessine un triangle rectangle vu de profil (1x1)
   shape.moveTo(-0.5, -0.5);
   shape.lineTo(0.5, -0.5);
   shape.lineTo(-0.5, 0.5);
-  shape.lineTo(-0.5, -0.5); // Fermer la forme
-
-  const extrudeSettings = {
-    steps: 1,
-    depth: 1, // Profondeur Z de 1
-    bevelEnabled: false,
-  };
-
-  const geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
-  // L'extrusion se fait en Z positif par défaut, on centre l'objet
+  shape.lineTo(-0.5, -0.5);
+  const geometry = new THREE.ExtrudeGeometry(shape, { steps: 1, depth: 1, bevelEnabled: false });
   geometry.center(); 
   return geometry;
 };
@@ -59,14 +48,12 @@ function ShapeVisual({ shape, color, opacity = 1, isSelected, scale = [1,1,1] })
     emissive: isSelected ? '#0000aa' : '#000000',
     transparent: opacity < 1, 
     opacity: opacity,
-    side: THREE.DoubleSide // Important pour voir l'intérieur du toit si besoin
+    side: THREE.DoubleSide 
   });
 
-  // On utilise useMemo pour ne pas recréer la géométrie "Prisme" à chaque frame
   const geometry = useMemo(() => {
     if (shape === 'column') return new THREE.CylinderGeometry(0.5, 0.5, 1, 32);
     if (shape === 'slab') return new THREE.BoxGeometry(1, 0.5, 1);
-    // C'EST ICI QUE ÇA CHANGE : Vrai Prisme Triangle
     if (shape === 'slope') return createPrismGeometry();
     return new THREE.BoxGeometry(1, 1, 1);
   }, [shape]);
@@ -82,6 +69,44 @@ function ShapeVisual({ shape, color, opacity = 1, isSelected, scale = [1,1,1] })
       )}
     </group>
   );
+}
+
+// --- NOUVEAU : GUIDE DE PLACEMENT (LASER) ---
+function PlacementGuide({ position, boxSize }) {
+    // position = là où est le fantôme (en l'air)
+    // On dessine une ligne vers le bas et un carré au sol
+    if (!position) return null;
+
+    // Calcul du "sol" local (on arrondit Y à l'entier ou .5 inférieur)
+    // C'est juste visuel
+    const groundY = 0; // On pourrait le rendre dynamique mais 0 est une bonne ref
+    
+    return (
+        <group>
+            {/* Ligne verticale (Laser) */}
+            <line>
+                <bufferGeometry attach="geometry" >
+                    <float32BufferAttribute 
+                        attach="attributes-position" 
+                        count={2} 
+                        array={new Float32Array([position[0], position[1], position[2], position[0], 0, position[2]])} 
+                        itemSize={3} 
+                    />
+                </bufferGeometry>
+                <lineBasicMaterial attach="material" color="yellow" opacity={0.6} transparent />
+            </line>
+            
+            {/* Ombre portée au sol (X/Z) */}
+            <mesh position={[position[0], 0.02, position[2]]} rotation={[-Math.PI/2, 0, 0]}>
+                <planeGeometry args={[boxSize.x || 1, boxSize.z || 1]} />
+                <meshBasicMaterial color="yellow" opacity={0.3} transparent />
+                <lineSegments>
+                    <edgesGeometry args={[new THREE.PlaneGeometry(boxSize.x || 1, boxSize.z || 1)]} />
+                    <lineBasicMaterial color="yellow" />
+                </lineSegments>
+            </mesh>
+        </group>
+    );
 }
 
 // --- FANTÔME ---
@@ -133,14 +158,14 @@ function Piece({ data, onRemove, onClickAdd, onHover, onGrab, onSelect, isSelect
   const handlePointerMove = (e) => {
       e.stopPropagation();
       if (appMode === 'BUILD') {
-          // NOUVEAUTÉ : On envoie tout ce qu'il faut pour calculer le stacking
-          // On a besoin de savoir où est le HAUT de l'objet survolé
-          // Astuce : On calcule la boite englobante pour trouver le point le plus haut
+          // On envoie les infos complètes pour le calcul de collision
           onHover(e, {
-             position: data.position, // Position du centre de l'objet survolé
+             position: data.position,
              scale: data.isGroup ? [1,1,1] : scl,
              shape: data.isGroup ? 'group' : data.shape,
-             rotation: rot
+             // Pour un groupe, on ne connait pas la hauteur exacte sans iterer, 
+             // mais on a besoin de savoir si on est sur le toit ou le flanc.
+             isGroup: data.isGroup
           });
       }
   };
@@ -164,7 +189,6 @@ function Piece({ data, onRemove, onClickAdd, onHover, onGrab, onSelect, isSelect
                             isSelected={isSelected} 
                             scale={blockScale}
                         />
-                        {/* Hitbox locale */}
                         <mesh visible={false} onClick={handleInteraction} onPointerMove={handlePointerMove}>
                             <boxGeometry args={[1 * blockScale[0], finalH, 1 * blockScale[2]]} />
                         </mesh>
@@ -189,7 +213,6 @@ function Piece({ data, onRemove, onClickAdd, onHover, onGrab, onSelect, isSelect
         isSelected={isSelected} 
         scale={scl}
       />
-      {/* Hitbox */}
       <mesh visible={false} 
         onClick={handleInteraction}
         onPointerMove={handlePointerMove}
@@ -209,6 +232,7 @@ function Scene({
   currentGroup 
 }) {
   const [hoverPos, setHoverPos] = useState(null);
+  const [guideSize, setGuideSize] = useState({x:1, z:1}); // Pour la taille de l'ombre
 
   useEffect(() => {
     const handleInput = (e) => {
@@ -250,115 +274,91 @@ function Scene({
     setPieces([...pieces, newPiece]);
   };
 
-  // --- NOUVELLE LOGIQUE DE PLACEMENT (GRAVITÉ) ---
   const onMouseMove = (e, targetInfo = null) => {
     if (appMode !== 'BUILD') return;
     e.stopPropagation();
 
-    // 1. Calculer la hauteur PHYSIQUE de l'objet qu'on tient
-    // (Pour savoir de combien il faut remonter son centre pour que ses pieds touchent le sol)
+    // 1. CALCUL DIMENSIONS PHYSIQUES (CORRECTIF GROUPE)
     let myHeight = 0;
-    
+    let myWidthX = 1;
+    let myDepthZ = 1;
+
     if (currentGroup) {
-        // Pour un groupe, on simplifie : on assume que l'origine relative (0,0,0) est en bas.
-        // Si le groupe est centré, il faudrait une BoundingBox. 
-        // Par défaut ici : 1.
-        myHeight = 1; 
-    } else {
-        const baseH = SHAPES[currentShape]?.heightBase || 1;
-        // On prend le scale Y, mais attention si l'objet est couché (Rotation X ou Z = 90°)
-        // Approx simple : si on tourne, les dimensions s'échangent.
+        // FIX: On regarde le PREMIER bloc (le pivot, trié à la création)
+        const pivot = currentGroup.blocks[0];
+        const baseH = SHAPES[pivot.shape]?.heightBase || 1;
+        
+        // On prend le scale du pivot
+        const pivotScale = getScale(pivot.scale);
+        
+        // On applique la rotation actuelle (celle qu'on est en train de faire avec R)
         const isRotated = Math.abs(Math.sin(rotation[0])) > 0.5 || Math.abs(Math.sin(rotation[2])) > 0.5;
-        // Si on est couché, la hauteur physique devient la largeur ou profondeur (souvent 1 ou scale X/Z)
-        // C'est complexe, restons simple :
+        
+        // Hauteur physique = Hauteur du pivot * Scale Y
+        // (Si le groupe est couché, ça devient complexe, mais assumons qu'on pose sur les pieds)
+        myHeight = baseH * pivotScale[1];
+        if (isRotated) myHeight = pivotScale[0]; // Approx
+        
+        // Pour l'ombre
+        myWidthX = pivotScale[0];
+        myDepthZ = pivotScale[2];
+
+    } else {
+        // Bloc simple
+        const baseH = SHAPES[currentShape]?.heightBase || 1;
+        const isRotated = Math.abs(Math.sin(rotation[0])) > 0.5 || Math.abs(Math.sin(rotation[2])) > 0.5;
         myHeight = baseH * currentScale[1]; 
-        if (isRotated) myHeight = currentScale[0]; // Approximation si couché
+        if (isRotated) myHeight = currentScale[0];
+
+        // Calcul précis de l'ombre en fonction de la rotation Y
+        // Si on tourne de 90° sur Y, on inverse X et Z
+        const isRotY90 = Math.abs(Math.sin(rotation[1])) > 0.5;
+        myWidthX = isRotY90 ? currentScale[2] : currentScale[0];
+        myDepthZ = isRotY90 ? currentScale[0] : currentScale[2];
     }
 
-    // Le "Offset" pour que le bas de l'objet soit au point de contact
-    const yOffset = myHeight / 2;
+    setGuideSize({x: myWidthX, z: myDepthZ}); // On met à jour l'ombre
 
-    // 2. Définir l'altitude du support (Y du contact)
+    // 2. LOGIQUE DE CONTACT (GRAVITÉ)
+    const yOffset = myHeight / 2;
     let contactY = 0;
 
     if (e.object.name === "ground") {
         contactY = 0;
     } else if (targetInfo) {
-        // On est sur un bloc. Quelle est la hauteur de ce bloc ?
-        // targetInfo contient position (centre) et scale.
-        // Haut du bloc = Centre Y + (Hauteur / 2)
-        // Attention : on doit utiliser la normale pour savoir si on tape le dessus ou le côté.
-        
         const normal = e.face.normal;
-        
-        // Si on tape le DESSUS (Normal Y > 0.5)
         if (normal.y > 0.5) {
-             // On s'empile !
-             // On doit calculer le Y du haut de la cible.
-             // On utilise le point d'impact précis 'e.point.y' qui est exactement sur la surface.
+             // On s'empile sur le toit
              contactY = e.point.y; 
         } else {
-             // On est sur le côté.
-             // On veut s'aligner verticalement avec le bloc cible, ou se poser au sol ?
-             // Généralement, si on construit sur le flanc, on veut garder le même Y que le voisin
-             // OU se poser sur ce qui est en dessous.
-             
-             // Simplification "Minecraft" :
-             // On prend le centre du bloc voisin, et on décale sur la grille.
-             // Si on vise le flanc, le Y ne change pas par rapport au voisin.
-             // MAIS il faut vérifier si le voisin est posé au sol.
-             
-             // Utilisons le point d'impact arrondi pour trouver le "Y du sol" local
-             // Si je tape le flanc à y=1.5, c'est que je suis en l'air.
-             
-             // Approche hybride :
-             // On prend la coordonnée du centre voisin + direction normale.
-             // Et on recalcule le Y pour qu'il "touche le bas".
-             
-             // REVENONS A PLUS SIMPLE : Utiliser le point d'impact e.point + normale.
-             const idealPos = e.point.clone().add(normal.clone().multiplyScalar(0.01));
-             // Si on tape le flanc, le Y change peu.
-             // Mais on veut recalculer le Y final pour qu'il soit "Bottom Aligned".
-             
-             // C'est là que c'est dur sans connaitre le sol sous-jacent.
-             // On va assumer que si on tape le flanc, on s'aligne sur la grille verticale.
-             contactY = Math.floor(idealPos.y); // On snap à l'étage du dessous ?
-             
-             // NON, plus simple : on s'aligne sur le centre du voisin.
+             // On se colle au flanc : on s'aligne sur le bas du voisin
+             // On récupère le centre Y du voisin
              const neighborCenterY = targetInfo.position[1];
-             // Si le voisin est à Y=0.5 (posé au sol), et qu'il fait 1m de haut.
-             // Je veux me mettre à côté. Mon bas doit être à 0.
-             // Donc mon centre doit être à 0 + myHeight/2.
              
-             // Pour généraliser : Le "Plancher" du voisin est (CenterY - NeighborHeight/2).
-             // On veut le même plancher.
+             // Il nous faut sa hauteur pour trouver son "plancher"
              let neighborHeight = 1;
              if (!targetInfo.isGroup) {
                  const nBase = SHAPES[targetInfo.shape]?.heightBase || 1;
                  neighborHeight = nBase * targetInfo.scale[1];
+             } else {
+                 // Pour un groupe voisin, on assume 1 (ou on pourrait stocker la hauteur du pivot)
+                 neighborHeight = 1; 
              }
              const floorLevel = neighborCenterY - (neighborHeight / 2);
              contactY = floorLevel;
         }
     }
 
-    // 3. Position finale
-    // X et Z : on snap sur la grille (Point + normale/2)
+    // 3. SNAPPING POSITION
     const normal = e.face.normal;
-    // On décale le point d'impact d'un demi-cube dans la direction de la normale pour trouver le centre de la case
-    // Attention : ça dépend de la taille de MON objet.
+    // On centre par rapport à la taille de l'ombre (Width/Depth)
+    const idealX = e.point.x + (normal.x * (myWidthX/2));
+    const idealZ = e.point.z + (normal.z * (myDepthZ/2));
     
-    // Calcul X/Z du centre
-    const idealX = e.point.x + (normal.x * (currentScale[0]/2));
-    const idealZ = e.point.z + (normal.z * (currentScale[2]/2));
-    
-    // Snap X/Z (Grille 0.5)
     const finalX = Math.round(idealX * 2) / 2;
     const finalZ = Math.round(idealZ * 2) / 2;
     
-    // Calcul Y Final
-    // Centre = ContactY + (MyHeight / 2)
-    // On snap le Y résultant pour éviter les flottants bizarres (Grille 0.25)
+    // Y final = Sol contact + Demi-hauteur
     const rawY = contactY + yOffset;
     const finalY = Math.round(rawY * 4) / 4;
 
@@ -394,6 +394,11 @@ function Scene({
       
       <Grid args={[20, 20]} cellColor="white" sectionColor="gray" infiniteGrid fadeDistance={30} position={[0, 0.01, 0]} />
       <OrbitControls makeDefault />
+
+      {/* NOUVEAU : AIDE VISUELLE */}
+      {appMode === 'BUILD' && hoverPos && (
+          <PlacementGuide position={hoverPos} boxSize={guideSize} />
+      )}
 
       {appMode === 'BUILD' && hoverPos && (
         <GhostPiece 
@@ -482,6 +487,7 @@ export default function App() {
       const hasGroups = selectedPieces.some(p => p.isGroup);
       if (hasGroups) { alert("Impossible de grouper des groupes."); return; }
 
+      // TRI : Le pivot est le bloc le plus bas
       selectedPieces.sort((a, b) => a.position[1] - b.position[1]);
       const pivotBlock = selectedPieces[0];
       
@@ -527,7 +533,7 @@ export default function App() {
     const blob = new Blob([data], { type: 'application/json' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    link.download = `temple-v4-${new Date().toISOString().slice(0,10)}.json`;
+    link.download = `temple-v5-${new Date().toISOString().slice(0,10)}.json`;
     link.click();
   };
 
