@@ -5,7 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 import * as THREE from 'three';
 
 // --- 0. VERSIONNING ---
-const APP_VERSION = "v0.5.0 (Gravity Fix & Guides)";
+const APP_VERSION = "v0.5.1 (Visual Gap Fix)";
 
 // --- 1. CONFIGURATION MATÉRIAUX ---
 const MATERIALS = {
@@ -71,19 +71,11 @@ function ShapeVisual({ shape, color, opacity = 1, isSelected, scale = [1,1,1] })
   );
 }
 
-// --- NOUVEAU : GUIDE DE PLACEMENT (LASER) ---
+// --- GUIDE DE PLACEMENT (LASER) ---
 function PlacementGuide({ position, boxSize }) {
-    // position = là où est le fantôme (en l'air)
-    // On dessine une ligne vers le bas et un carré au sol
     if (!position) return null;
-
-    // Calcul du "sol" local (on arrondit Y à l'entier ou .5 inférieur)
-    // C'est juste visuel
-    const groundY = 0; // On pourrait le rendre dynamique mais 0 est une bonne ref
-    
     return (
         <group>
-            {/* Ligne verticale (Laser) */}
             <line>
                 <bufferGeometry attach="geometry" >
                     <float32BufferAttribute 
@@ -95,8 +87,6 @@ function PlacementGuide({ position, boxSize }) {
                 </bufferGeometry>
                 <lineBasicMaterial attach="material" color="yellow" opacity={0.6} transparent />
             </line>
-            
-            {/* Ombre portée au sol (X/Z) */}
             <mesh position={[position[0], 0.02, position[2]]} rotation={[-Math.PI/2, 0, 0]}>
                 <planeGeometry args={[boxSize.x || 1, boxSize.z || 1]} />
                 <meshBasicMaterial color="yellow" opacity={0.3} transparent />
@@ -158,13 +148,10 @@ function Piece({ data, onRemove, onClickAdd, onHover, onGrab, onSelect, isSelect
   const handlePointerMove = (e) => {
       e.stopPropagation();
       if (appMode === 'BUILD') {
-          // On envoie les infos complètes pour le calcul de collision
           onHover(e, {
              position: data.position,
              scale: data.isGroup ? [1,1,1] : scl,
              shape: data.isGroup ? 'group' : data.shape,
-             // Pour un groupe, on ne connait pas la hauteur exacte sans iterer, 
-             // mais on a besoin de savoir si on est sur le toit ou le flanc.
              isGroup: data.isGroup
           });
       }
@@ -232,7 +219,7 @@ function Scene({
   currentGroup 
 }) {
   const [hoverPos, setHoverPos] = useState(null);
-  const [guideSize, setGuideSize] = useState({x:1, z:1}); // Pour la taille de l'ombre
+  const [guideSize, setGuideSize] = useState({x:1, z:1});
 
   useEffect(() => {
     const handleInput = (e) => {
@@ -278,46 +265,31 @@ function Scene({
     if (appMode !== 'BUILD') return;
     e.stopPropagation();
 
-    // 1. CALCUL DIMENSIONS PHYSIQUES (CORRECTIF GROUPE)
+    // 1. CALCUL DIMENSIONS PHYSIQUES
     let myHeight = 0;
     let myWidthX = 1;
     let myDepthZ = 1;
 
     if (currentGroup) {
-        // FIX: On regarde le PREMIER bloc (le pivot, trié à la création)
         const pivot = currentGroup.blocks[0];
         const baseH = SHAPES[pivot.shape]?.heightBase || 1;
-        
-        // On prend le scale du pivot
         const pivotScale = getScale(pivot.scale);
-        
-        // On applique la rotation actuelle (celle qu'on est en train de faire avec R)
         const isRotated = Math.abs(Math.sin(rotation[0])) > 0.5 || Math.abs(Math.sin(rotation[2])) > 0.5;
-        
-        // Hauteur physique = Hauteur du pivot * Scale Y
-        // (Si le groupe est couché, ça devient complexe, mais assumons qu'on pose sur les pieds)
         myHeight = baseH * pivotScale[1];
-        if (isRotated) myHeight = pivotScale[0]; // Approx
-        
-        // Pour l'ombre
+        if (isRotated) myHeight = pivotScale[0];
         myWidthX = pivotScale[0];
         myDepthZ = pivotScale[2];
-
     } else {
-        // Bloc simple
         const baseH = SHAPES[currentShape]?.heightBase || 1;
         const isRotated = Math.abs(Math.sin(rotation[0])) > 0.5 || Math.abs(Math.sin(rotation[2])) > 0.5;
         myHeight = baseH * currentScale[1]; 
         if (isRotated) myHeight = currentScale[0];
-
-        // Calcul précis de l'ombre en fonction de la rotation Y
-        // Si on tourne de 90° sur Y, on inverse X et Z
         const isRotY90 = Math.abs(Math.sin(rotation[1])) > 0.5;
         myWidthX = isRotY90 ? currentScale[2] : currentScale[0];
         myDepthZ = isRotY90 ? currentScale[0] : currentScale[2];
     }
 
-    setGuideSize({x: myWidthX, z: myDepthZ}); // On met à jour l'ombre
+    setGuideSize({x: myWidthX, z: myDepthZ});
 
     // 2. LOGIQUE DE CONTACT (GRAVITÉ)
     const yOffset = myHeight / 2;
@@ -328,39 +300,41 @@ function Scene({
     } else if (targetInfo) {
         const normal = e.face.normal;
         if (normal.y > 0.5) {
-             // On s'empile sur le toit
              contactY = e.point.y; 
         } else {
-             // On se colle au flanc : on s'aligne sur le bas du voisin
-             // On récupère le centre Y du voisin
              const neighborCenterY = targetInfo.position[1];
-             
-             // Il nous faut sa hauteur pour trouver son "plancher"
              let neighborHeight = 1;
              if (!targetInfo.isGroup) {
                  const nBase = SHAPES[targetInfo.shape]?.heightBase || 1;
                  neighborHeight = nBase * targetInfo.scale[1];
              } else {
-                 // Pour un groupe voisin, on assume 1 (ou on pourrait stocker la hauteur du pivot)
                  neighborHeight = 1; 
              }
-             const floorLevel = neighborCenterY - (neighborHeight / 2);
-             contactY = floorLevel;
+             contactY = neighborCenterY - (neighborHeight / 2);
         }
     }
 
     // 3. SNAPPING POSITION
     const normal = e.face.normal;
-    // On centre par rapport à la taille de l'ombre (Width/Depth)
     const idealX = e.point.x + (normal.x * (myWidthX/2));
     const idealZ = e.point.z + (normal.z * (myDepthZ/2));
     
     const finalX = Math.round(idealX * 2) / 2;
     const finalZ = Math.round(idealZ * 2) / 2;
     
-    // Y final = Sol contact + Demi-hauteur
-    const rawY = contactY + yOffset;
-    const finalY = Math.round(rawY * 4) / 4;
+    // --- FIX v0.5.1 : LE "JOINT" ---
+    let finalY = contactY + yOffset;
+    
+    // Si on vise le DESSUS d'un objet (on empile), on applique le correctif
+    if (targetInfo && normal.y > 0.5) {
+        // On soustrait 2 millimètres pour que les objets se chevauchent légèrement
+        // et masquer le jour visuel.
+        // IMPORTANT : On ne snap PAS sur la grille dans ce cas pour coller parfaitement.
+        finalY -= 0.002; 
+    } else {
+        // Sinon (sol ou flanc), on snap sur la grille verticale
+        finalY = Math.round(finalY * 4) / 4;
+    }
 
     setHoverPos([finalX, finalY, finalZ]);
   };
@@ -395,7 +369,6 @@ function Scene({
       <Grid args={[20, 20]} cellColor="white" sectionColor="gray" infiniteGrid fadeDistance={30} position={[0, 0.01, 0]} />
       <OrbitControls makeDefault />
 
-      {/* NOUVEAU : AIDE VISUELLE */}
       {appMode === 'BUILD' && hoverPos && (
           <PlacementGuide position={hoverPos} boxSize={guideSize} />
       )}
@@ -487,7 +460,6 @@ export default function App() {
       const hasGroups = selectedPieces.some(p => p.isGroup);
       if (hasGroups) { alert("Impossible de grouper des groupes."); return; }
 
-      // TRI : Le pivot est le bloc le plus bas
       selectedPieces.sort((a, b) => a.position[1] - b.position[1]);
       const pivotBlock = selectedPieces[0];
       
