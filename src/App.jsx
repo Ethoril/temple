@@ -5,7 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 import * as THREE from 'three';
 
 // --- 0. VERSIONNING ---
-const APP_VERSION = "v0.5.1 (Visual Gap Fix)";
+const APP_VERSION = "v0.6.0 (Parts List)";
 
 // --- 1. CONFIGURATION MATÉRIAUX ---
 const MATERIALS = {
@@ -71,7 +71,7 @@ function ShapeVisual({ shape, color, opacity = 1, isSelected, scale = [1,1,1] })
   );
 }
 
-// --- GUIDE DE PLACEMENT (LASER) ---
+// --- GUIDE DE PLACEMENT ---
 function PlacementGuide({ position, boxSize }) {
     if (!position) return null;
     return (
@@ -157,7 +157,6 @@ function Piece({ data, onRemove, onClickAdd, onHover, onGrab, onSelect, isSelect
       }
   };
 
-  // CAS GROUPE
   if (data.isGroup && data.structureData) {
       return (
         <group position={data.position} rotation={rot}>
@@ -186,7 +185,6 @@ function Piece({ data, onRemove, onClickAdd, onHover, onGrab, onSelect, isSelect
       );
   }
 
-  // CAS BLOC SIMPLE
   const matInfo = MATERIALS[data.type] || MATERIALS.stone;
   const baseH = SHAPES[data.shape]?.heightBase || 1;
   const finalH = baseH * scl[1];
@@ -265,7 +263,6 @@ function Scene({
     if (appMode !== 'BUILD') return;
     e.stopPropagation();
 
-    // 1. CALCUL DIMENSIONS PHYSIQUES
     let myHeight = 0;
     let myWidthX = 1;
     let myDepthZ = 1;
@@ -291,7 +288,6 @@ function Scene({
 
     setGuideSize({x: myWidthX, z: myDepthZ});
 
-    // 2. LOGIQUE DE CONTACT (GRAVITÉ)
     const yOffset = myHeight / 2;
     let contactY = 0;
 
@@ -314,27 +310,15 @@ function Scene({
         }
     }
 
-    // 3. SNAPPING POSITION
     const normal = e.face.normal;
     const idealX = e.point.x + (normal.x * (myWidthX/2));
     const idealZ = e.point.z + (normal.z * (myDepthZ/2));
-    
     const finalX = Math.round(idealX * 2) / 2;
     const finalZ = Math.round(idealZ * 2) / 2;
     
-    // --- FIX v0.5.1 : LE "JOINT" ---
     let finalY = contactY + yOffset;
-    
-    // Si on vise le DESSUS d'un objet (on empile), on applique le correctif
-    if (targetInfo && normal.y > 0.5) {
-        // On soustrait 2 millimètres pour que les objets se chevauchent légèrement
-        // et masquer le jour visuel.
-        // IMPORTANT : On ne snap PAS sur la grille dans ce cas pour coller parfaitement.
-        finalY -= 0.002; 
-    } else {
-        // Sinon (sol ou flanc), on snap sur la grille verticale
-        finalY = Math.round(finalY * 4) / 4;
-    }
+    if (targetInfo && normal.y > 0.5) finalY -= 0.002; 
+    else finalY = Math.round(finalY * 4) / 4;
 
     setHoverPos([finalX, finalY, finalZ]);
   };
@@ -413,13 +397,16 @@ export default function App() {
   const [appMode, setAppMode] = useState('BUILD');
   const [selectedIds, setSelectedIds] = useState([]);
   const [savedGroups, setSavedGroups] = useState([]); 
-  const [currentGroup, setCurrentGroup] = useState(null); 
+  const [currentGroup, setCurrentGroup] = useState(null);
+  
+  // NOUVEAU : État pour afficher la liste
+  const [showPartList, setShowPartList] = useState(false);
   
   const fileInputRef = useRef(null);
 
   useEffect(() => {
       const handleGlobalKeys = (e) => {
-          if (e.key === 'Escape') { setAppMode('VIEW'); setCurrentGroup(null); }
+          if (e.key === 'Escape') { setAppMode('VIEW'); setCurrentGroup(null); setShowPartList(false); }
           if (e.key.toLowerCase() === 'c') setAppMode('BUILD');
           if (e.key.toLowerCase() === 's') setAppMode('SELECT');
           if (e.key === 'Delete' || e.key === 'Backspace') deleteSelection();
@@ -505,7 +492,7 @@ export default function App() {
     const blob = new Blob([data], { type: 'application/json' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    link.download = `temple-v5-${new Date().toISOString().slice(0,10)}.json`;
+    link.download = `temple-v6-${new Date().toISOString().slice(0,10)}.json`;
     link.click();
   };
 
@@ -523,9 +510,51 @@ export default function App() {
     reader.readAsText(file);
   };
 
+  // --- CALCULATEUR DE DÉBIT (BILL OF MATERIALS) ---
+  const partsList = useMemo(() => {
+    const inventory = {};
+
+    // Fonction pour ajouter un bloc à l'inventaire
+    const addToInventory = (type, shape, scale) => {
+        const baseH = SHAPES[shape]?.heightBase || 1;
+        const scl = getScale(scale);
+        
+        // Dimensions finales
+        const dimX = scl[0];
+        const dimY = baseH * scl[1];
+        const dimZ = scl[2];
+
+        // Clé unique pour grouper
+        const key = `${type}|${shape}|${dimX}x${dimY}x${dimZ}`;
+        
+        if (!inventory[key]) {
+            inventory[key] = {
+                material: MATERIALS[type]?.name || type,
+                shapeName: SHAPES[shape]?.name || shape,
+                dims: { x: dimX, y: dimY, z: dimZ },
+                count: 0
+            };
+        }
+        inventory[key].count++;
+    };
+
+    pieces.forEach(p => {
+        if (p.isGroup && p.structureData) {
+            // Pour un groupe, on ajoute chaque sous-bloc
+            p.structureData.blocks.forEach(b => addToInventory(b.type, b.shape, b.scale));
+        } else {
+            // Bloc simple
+            addToInventory(p.type, p.shape, p.scale);
+        }
+    });
+
+    return Object.values(inventory).sort((a, b) => a.material.localeCompare(b.material));
+  }, [pieces]);
+
   return (
     <div style={{ width: '100vw', height: '100vh', position: 'relative' }}>
       
+      {/* --- UI PRINCIPALE --- */}
       <div style={{ position: 'absolute', top: 20, left: 20, zIndex: 10, background: 'rgba(0,0,0,0.85)', padding: '15px', borderRadius: '8px', color: 'white', maxWidth: '220px', maxHeight: '90vh', overflowY: 'auto' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '10px' }}>
             <h1 style={{ margin: 0, fontSize: '1.2rem' }}>🏛️ Architecte</h1>
@@ -544,6 +573,11 @@ export default function App() {
             <button onClick={() => setAppMode('VIEW')}
             style={{ padding: '8px', cursor: 'pointer', background: appMode === 'VIEW' ? '#9E9E9E' : '#444', color: 'white', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}>
             👀 VUE (Echap)
+            </button>
+             {/* NOUVEAU BOUTON */}
+            <button onClick={() => setShowPartList(!showPartList)}
+            style={{ padding: '8px', cursor: 'pointer', background: '#FF9800', color: 'white', border: 'none', borderRadius: '4px', fontWeight: 'bold', marginTop:'5px' }}>
+            📜 LISTE PIÈCES
             </button>
         </div>
 
@@ -625,6 +659,49 @@ export default function App() {
         </div>
         <input type="file" ref={fileInputRef} style={{ display: 'none' }} onChange={loadTemple} accept=".json" />
       </div>
+
+      {/* --- MODALE LISTE DES PIÈCES --- */}
+      {showPartList && (
+          <div style={{
+              position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
+              background: '#222', color: 'white', padding: '20px', borderRadius: '8px',
+              zIndex: 20, width: '400px', maxHeight: '80vh', overflowY: 'auto',
+              boxShadow: '0 0 20px rgba(0,0,0,0.5)', border: '1px solid #444'
+          }}>
+              <div style={{display:'flex', justifyContent:'space-between', marginBottom:'15px'}}>
+                  <h2 style={{margin:0, fontSize:'1.2rem'}}>📜 Débit Matériaux</h2>
+                  <button onClick={() => setShowPartList(false)} style={{background:'transparent', border:'none', color:'white', fontSize:'1.2rem', cursor:'pointer'}}>✖️</button>
+              </div>
+              
+              <table style={{width:'100%', borderCollapse:'collapse', fontSize:'0.9rem'}}>
+                  <thead>
+                      <tr style={{borderBottom:'1px solid #555', textAlign:'left'}}>
+                          <th style={{padding:'5px'}}>Qte</th>
+                          <th style={{padding:'5px'}}>Matériau / Forme</th>
+                          <th style={{padding:'5px'}}>Dimensions (cm)</th>
+                      </tr>
+                  </thead>
+                  <tbody>
+                      {partsList.map((item, idx) => (
+                          <tr key={idx} style={{borderBottom:'1px solid #333'}}>
+                              <td style={{padding:'5px', fontWeight:'bold', color:'#FF9800'}}>{item.count}</td>
+                              <td style={{padding:'5px'}}>
+                                  <span style={{color:'#aaa'}}>{item.material}</span><br/>
+                                  {item.shapeName}
+                              </td>
+                              <td style={{padding:'5px', fontFamily:'monospace'}}>
+                                  {item.dims.x} x {item.dims.y} x {item.dims.z}
+                              </td>
+                          </tr>
+                      ))}
+                      {partsList.length === 0 && <tr><td colSpan="3" style={{padding:'20px', textAlign:'center', color:'#666'}}>Aucune pièce posée.</td></tr>}
+                  </tbody>
+              </table>
+              <div style={{marginTop:'15px', fontSize:'0.7rem', color:'#888', fontStyle:'italic'}}>
+                  * Les dimensions (Largeur x Hauteur x Profondeur) sont les cotes de découpe du bloc brut.
+              </div>
+          </div>
+      )}
 
       <Canvas camera={{ position: [5, 5, 5], fov: 50 }}>
         <Scene 
