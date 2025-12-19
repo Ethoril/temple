@@ -5,7 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 import * as THREE from 'three';
 
 // --- 0. VERSIONNING ---
-const APP_VERSION = "v0.8.0 (Undo & Precision)";
+const APP_VERSION = "v0.9.0 (Height Lock)";
 
 // --- 1. CONFIGURATION MATÉRIAUX ---
 const MATERIALS = {
@@ -18,7 +18,7 @@ const MATERIALS = {
   roof:   { color: '#8B0000', name: 'Tuile' },
 };
 
-// --- 2. CONFIGURATION DES FORMES (NORMALISÉES) ---
+// --- 2. CONFIGURATION DES FORMES ---
 const SHAPES = {
   cube:   { name: 'Cube',          heightBase: 1, defaultScale: [1, 1, 1] },
   slab:   { name: 'Dalle',         heightBase: 1, defaultScale: [1, 0.5, 1] },
@@ -71,8 +71,11 @@ function ShapeVisual({ shape, color, opacity = 1, isSelected, scale = [1,1,1] })
 }
 
 // --- GUIDE DE PLACEMENT (LASER) ---
-function PlacementGuide({ position, boxSize }) {
+// Modifié pour changer de couleur quand verrouillé
+function PlacementGuide({ position, boxSize, isLocked }) {
     if (!position) return null;
+    const color = isLocked ? '#00FF00' : 'yellow'; // Vert si lock, Jaune sinon
+
     return (
         <group position={[position[0], 0, position[2]]}>
             <line position={[-position[0], 0, -position[2]]}>
@@ -84,7 +87,7 @@ function PlacementGuide({ position, boxSize }) {
                         itemSize={3} 
                     />
                 </bufferGeometry>
-                <lineBasicMaterial attach="material" color="yellow" opacity={0.6} transparent />
+                <lineBasicMaterial attach="material" color={color} opacity={0.6} transparent />
             </line>
             <mesh 
                 position={[0, 0.02, 0]} 
@@ -92,7 +95,7 @@ function PlacementGuide({ position, boxSize }) {
                 scale={[boxSize.x || 1, boxSize.z || 1, 1]} 
             >
                 <planeGeometry args={[1, 1]} /> 
-                <meshBasicMaterial color="yellow" opacity={0.3} transparent />
+                <meshBasicMaterial color={color} opacity={0.3} transparent />
             </mesh>
             <lineSegments 
                 position={[0, 0.02, 0]} 
@@ -100,32 +103,23 @@ function PlacementGuide({ position, boxSize }) {
                 scale={[boxSize.x || 1, boxSize.z || 1, 1]}
             >
                 <edgesGeometry args={[new THREE.PlaneGeometry(1, 1)]} />
-                <lineBasicMaterial color="yellow" />
+                <lineBasicMaterial color={color} />
             </lineSegments>
         </group>
     );
 }
 
-// --- NOUVEAU : SURLIGNEUR DE FACE CIBLÉE ---
-// C'est ça qui va te dire "Je suis prêt à poser sur CETTE face"
+// --- SURLIGNEUR ---
 function FaceHighlighter({ targetInfo }) {
     if (!targetInfo || !targetInfo.normal || !targetInfo.point) return null;
-
     const { point, normal } = targetInfo;
-    
-    // On décale très légèrement le quad par rapport à la face pour éviter le z-fighting
     const position = point.clone().add(normal.clone().multiplyScalar(0.01));
-
-    // On doit orienter le quad pour qu'il soit parallèle à la face
     const quaternion = new THREE.Quaternion();
-    // Le plan de base regarde vers Z+ (0,0,1). On doit le tourner vers la normale.
-    if (normal.length() > 0) {
-        quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
-    }
+    if (normal.length() > 0) quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
 
     return (
         <mesh position={position} quaternion={quaternion}>
-            <planeGeometry args={[0.5, 0.5]} /> {/* Petit carré de 50cm */}
+            <planeGeometry args={[0.5, 0.5]} />
             <meshBasicMaterial color="red" opacity={0.5} transparent side={THREE.DoubleSide} />
         </mesh>
     );
@@ -185,7 +179,6 @@ function Piece({ data, onRemove, onClickAdd, onHover, onGrab, onSelect, isSelect
              scale: data.isGroup ? [1,1,1] : scl,
              shape: data.isGroup ? 'group' : data.shape,
              isGroup: data.isGroup,
-             // On passe le point précis et la normale pour le Highlighter
              point: e.point,
              normal: e.face.normal
           });
@@ -245,8 +238,8 @@ function Piece({ data, onRemove, onClickAdd, onHover, onGrab, onSelect, isSelect
 
 // --- SCÈNE ---
 function Scene({ 
-  pieces, setPieces, // setPieces sera maintenant wrapper par l'historique
-  saveHistory, // Fonction pour sauvegarder l'état AVANT modif
+  pieces, setPieces, 
+  saveHistory,
   currentMat, currentShape, rotation, setRotation, currentScale,
   appMode, selectedIds, setSelectedIds,
   onGrabBlock,
@@ -254,24 +247,45 @@ function Scene({
 }) {
   const [hoverPos, setHoverPos] = useState(null);
   const [guideSize, setGuideSize] = useState({x:1, z:1});
-  const [targetInfo, setTargetInfo] = useState(null); // Pour le FaceHighlighter
+  const [targetInfo, setTargetInfo] = useState(null);
+  
+  // --- NOUVEAU : GESTION DU LOCK ---
+  const [lockedY, setLockedY] = useState(null); // Stocke la hauteur verrouillée
 
   useEffect(() => {
     const handleInput = (e) => {
+      // Rotation
       if (e.key.toLowerCase() === 'r') setRotation(prev => [prev[0], prev[1] + Math.PI / 2, prev[2]]);
       if (e.key.toLowerCase() === 't') setRotation(prev => [prev[0] + Math.PI / 2, prev[1], prev[2]]);
       if (e.key.toLowerCase() === 'g') setRotation(prev => [prev[0], prev[1], prev[2] + Math.PI / 2]);
+      
+      // LOCK (Shift)
+      if (e.key === 'Shift') {
+          // On ne lock que si on a déjà une position valide sous la souris
+          if (hoverPos) {
+              setLockedY(hoverPos[1]); // On capture la hauteur actuelle
+          }
+      }
     };
-    window.addEventListener('keydown', handleInput);
-    return () => window.removeEventListener('keydown', handleInput);
-  }, [setRotation]);
+    
+    const handleKeyUp = (e) => {
+        if (e.key === 'Shift') {
+            setLockedY(null); // On libère le lock
+        }
+    };
 
-  useEffect(() => { if (appMode !== 'BUILD') { setHoverPos(null); setTargetInfo(null); } }, [appMode]);
+    window.addEventListener('keydown', handleInput);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+        window.removeEventListener('keydown', handleInput);
+        window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [hoverPos, setRotation]);
+
+  useEffect(() => { if (appMode !== 'BUILD') { setHoverPos(null); setTargetInfo(null); setLockedY(null); } }, [appMode]);
 
   const addBlock = () => {
     if (!hoverPos || appMode !== 'BUILD') return;
-    
-    // SAUVEGARDE HISTO
     saveHistory();
 
     if (currentGroup) {
@@ -302,8 +316,7 @@ function Scene({
   const onMouseMove = (e, tInfo = null) => {
     if (appMode !== 'BUILD') return;
     e.stopPropagation();
-    
-    setTargetInfo(tInfo); // On stocke l'info pour le highlighter rouge
+    setTargetInfo(tInfo);
 
     let myHeight = 0;
     let myWidthX = 1;
@@ -330,43 +343,66 @@ function Scene({
 
     setGuideSize({x: myWidthX, z: myDepthZ});
 
-    const yOffset = myHeight / 2;
-    let contactY = 0;
-
-    if (e.object.name === "ground") {
-        contactY = 0;
-    } else if (tInfo) {
-        const normal = e.face.normal;
-        // LOGIQUE RENFORCÉE : On regarde la normale
-        if (normal.y > 0.5) {
-             // Face du HAUT
-             contactY = e.point.y; 
-        } else if (normal.y < -0.5) {
-             // Face du BAS (si on construit sous un truc flottant)
-             // contactY serait le bas de l'objet, moins ma hauteur... mais restons simple
-             const neighborCenterY = tInfo.position[1];
-             contactY = neighborCenterY; // Simplification
-        } else {
-             // Face LATÉRALE
-             const neighborCenterY = tInfo.position[1];
-             let neighborHeight = 1;
-             if (!tInfo.isGroup) {
-                 const nBase = SHAPES[tInfo.shape]?.heightBase || 1;
-                 neighborHeight = nBase * tInfo.scale[1];
-             }
-             contactY = neighborCenterY - (neighborHeight / 2);
-        }
-    }
-
+    // --- CALCUL POSITION ---
+    // X et Z suivent toujours la souris (snap 0.5)
     const normal = e.face.normal;
-    const idealX = e.point.x + (normal.x * (myWidthX/2));
-    const idealZ = e.point.z + (normal.z * (myDepthZ/2));
+    // Note: Pour X/Z, on prend le point d'impact direct.
+    // Si on est locké, on ignore la normale pour le décalage (on glisse),
+    // mais on garde le grid snap.
+    
+    // Simplification X/Z : Point d'impact pur + centrage ombre
+    // Mais attention aux faces latérales.
+    // Si lock activé -> On prend juste e.point x/z
+    // Si pas lock -> On utilise la normale comme avant
+    
+    let idealX, idealZ;
+    if (lockedY !== null) {
+        // En mode Lock, on ignore la normale pour le déplacement latéral,
+        // on veut juste suivre la souris sur le plan horizontal
+        idealX = e.point.x;
+        idealZ = e.point.z;
+    } else {
+        idealX = e.point.x + (normal.x * (myWidthX/2));
+        idealZ = e.point.z + (normal.z * (myDepthZ/2));
+    }
+    
     const finalX = Math.round(idealX * 2) / 2;
     const finalZ = Math.round(idealZ * 2) / 2;
     
-    let finalY = contactY + yOffset;
-    if (tInfo && normal.y > 0.5) finalY -= 0.002; 
-    else finalY = Math.round(finalY * 4) / 4;
+    // --- CALCUL Y (LA MAGIE OPÈRE ICI) ---
+    let finalY;
+
+    if (lockedY !== null) {
+        // SI LOCK ACTIVÉ : On force la hauteur mémorisée
+        finalY = lockedY;
+    } else {
+        // SINON : Calcul Standard
+        const yOffset = myHeight / 2;
+        let contactY = 0;
+
+        if (e.object.name === "ground") {
+            contactY = 0;
+        } else if (tInfo) {
+            const n = e.face.normal;
+            if (n.y > 0.5) contactY = e.point.y; 
+            else if (n.y < -0.5) contactY = tInfo.position[1]; 
+            else {
+                const neighborCenterY = tInfo.position[1];
+                let neighborHeight = 1;
+                if (!tInfo.isGroup) {
+                    const nBase = SHAPES[tInfo.shape]?.heightBase || 1;
+                    neighborHeight = nBase * tInfo.scale[1];
+                }
+                contactY = neighborCenterY - (neighborHeight / 2);
+            }
+        }
+        
+        let calculatedY = contactY + yOffset;
+        if (tInfo && e.face.normal.y > 0.5) calculatedY -= 0.002; 
+        else calculatedY = Math.round(calculatedY * 4) / 4;
+        
+        finalY = calculatedY;
+    }
 
     setHoverPos([finalX, finalY, finalZ]);
   };
@@ -402,10 +438,10 @@ function Scene({
       <OrbitControls makeDefault />
 
       {appMode === 'BUILD' && hoverPos && (
-          <PlacementGuide position={hoverPos} boxSize={guideSize} />
+          // On passe l'état "isLocked" au guide
+          <PlacementGuide position={hoverPos} boxSize={guideSize} isLocked={lockedY !== null} />
       )}
       
-      {/* VISUEL D'AIDE ROUGE */}
       {appMode === 'BUILD' && targetInfo && (
           <FaceHighlighter targetInfo={targetInfo} />
       )}
@@ -438,54 +474,43 @@ function Scene({
   );
 }
 
-// --- APP ---
+// --- APP (Reste identique, juste importer Scene mise à jour) ---
 export default function App() {
   const [pieces, setPieces] = useState([]);
-  
-  // --- HISTORIQUE (Undo/Redo) ---
   const [history, setHistory] = useState([]);
   const [future, setFuture] = useState([]);
 
-  // Fonction pour sauvegarder l'état actuel AVANT une modif
   const saveHistory = useCallback(() => {
     setHistory(prev => {
         const newHist = [...prev, pieces];
-        // On limite l'historique à 50 étapes pour la mémoire
         if (newHist.length > 50) newHist.shift(); 
         return newHist;
     });
-    setFuture([]); // Quand on fait une nouvelle action, on efface le futur alternatif
+    setFuture([]); 
   }, [pieces]);
 
   const undo = useCallback(() => {
       if (history.length === 0) return;
       const previous = history[history.length - 1];
-      setFuture(prev => [pieces, ...prev]); // On sauvegarde le présent dans le futur
+      setFuture(prev => [pieces, ...prev]);
       setPieces(previous);
-      setHistory(prev => prev.slice(0, -1)); // On retire le dernier état
+      setHistory(prev => prev.slice(0, -1));
   }, [history, pieces]);
 
   const redo = useCallback(() => {
       if (future.length === 0) return;
       const next = future[0];
-      setHistory(prev => [...prev, pieces]); // On sauvegarde le présent dans le passé
+      setHistory(prev => [...prev, pieces]); 
       setPieces(next);
       setFuture(prev => prev.slice(1));
   }, [future, pieces]);
 
-  // --- SHORTCUTS CLAVIER ---
   useEffect(() => {
       const handleUndoRedoKeys = (e) => {
-          // CTRL + Z
           if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
-              if (e.shiftKey) {
-                  redo(); // Ctrl + Shift + Z
-              } else {
-                  undo(); // Ctrl + Z
-              }
+              if (e.shiftKey) redo(); else undo();
               e.preventDefault();
           }
-          // CTRL + Y (Redo standard Windows)
           if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
               redo();
               e.preventDefault();
@@ -495,7 +520,6 @@ export default function App() {
       return () => window.removeEventListener('keydown', handleUndoRedoKeys);
   }, [undo, redo]);
 
-  // États standards
   const [currentMat, setCurrentMat] = useState('stone');
   const [currentShape, setCurrentShape] = useState('cube');
   const [rotation, setRotation] = useState([0, 0, 0]);
@@ -518,10 +542,10 @@ export default function App() {
       };
       window.addEventListener('keydown', handleGlobalKeys);
       return () => window.removeEventListener('keydown', handleGlobalKeys);
-  }, [selectedIds, appMode]); // Attention, j'ai enlevé deleteSelection des deps ici pour éviter boucle, on utilise la réf
+  }, [selectedIds, appMode]);
 
   const handleGrabBlock = (blockData) => {
-    saveHistory(); // On sauvegarde avant de "voler" le bloc
+    saveHistory();
     setPieces((prev) => prev.filter(p => p.id !== blockData.id));
     if (blockData.isGroup) {
         setCurrentGroup(blockData.structureData);
@@ -553,8 +577,7 @@ export default function App() {
       const hasGroups = selectedPieces.some(p => p.isGroup);
       if (hasGroups) { alert("Impossible de grouper des groupes."); return; }
       
-      saveHistory(); // Sauvegarde avant transformation
-      
+      saveHistory(); 
       selectedPieces.sort((a, b) => a.position[1] - b.position[1]);
       const pivotBlock = selectedPieces[0];
       const blocksData = selectedPieces.map(p => ({
@@ -579,9 +602,7 @@ export default function App() {
       if(mat) setCurrentMat(mat);
       if(shape) {
           setCurrentShape(shape);
-          if (SHAPES[shape]?.defaultScale) {
-              setCurrentScale([...SHAPES[shape].defaultScale]);
-          }
+          if (SHAPES[shape]?.defaultScale) setCurrentScale([...SHAPES[shape].defaultScale]);
       }
   };
 
@@ -596,7 +617,7 @@ export default function App() {
     const blob = new Blob([data], { type: 'application/json' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    link.download = `temple-v8-${new Date().toISOString().slice(0,10)}.json`;
+    link.download = `temple-v9-${new Date().toISOString().slice(0,10)}.json`;
     link.click();
   };
 
@@ -609,7 +630,7 @@ export default function App() {
             const data = JSON.parse(ev.target.result);
             if (Array.isArray(data)) setPieces(data);
             else { setPieces(data.pieces || []); setSavedGroups(data.savedGroups || []); }
-            setHistory([]); // Reset historique sur nouveau chargement
+            setHistory([]); 
             setFuture([]);
         } catch (err) { alert("Erreur fichier"); }
     };
@@ -655,7 +676,6 @@ export default function App() {
         </div>
         
         <div style={{ display: 'flex', flexDirection: 'column', gap: '5px', marginBottom: '15px' }}>
-            {/* BOUTONS UNDO / REDO VISUELS AUSSI */}
             <div style={{display:'flex', gap:'5px', marginBottom:'5px'}}>
                  <button onClick={undo} disabled={history.length===0} style={{flex:1, cursor: history.length>0?'pointer':'not-allowed', opacity:history.length>0?1:0.5, padding:'5px', background:'#444', color:'white', border:'none', borderRadius:'4px'}}>↩ Undo</button>
                  <button onClick={redo} disabled={future.length===0} style={{flex:1, cursor: future.length>0?'pointer':'not-allowed', opacity:future.length>0?1:0.5, padding:'5px', background:'#444', color:'white', border:'none', borderRadius:'4px'}}>↪ Redo</button>
@@ -708,10 +728,15 @@ export default function App() {
                 <input type="number" step="0.5" value={currentScale[2]} onChange={(e) => updateScale(2, e.target.value)} 
                     style={{width:'50px', padding:'4px', borderRadius:'4px', border:'none'}} title="Profondeur (Z)" />
             </div>
+            
+            <div style={{ fontSize: '0.75rem', color: '#ccc', margin: '5px 0', fontStyle: 'italic' }}>
+               <p>🔄 <strong>R</strong> : Pivoter</p>
+               <p>🔒 <strong>Shift</strong> : Verrouiller Hauteur</p>
+            </div>
           </>
         )}
         
-        {/* ... (Reste de l'UI Sélection et Structures identique) */}
+        {/* ... (Sélection / Liste / etc.) ... */}
         {appMode === 'SELECT' && selectedIds.length > 0 && (
             <div style={{ marginBottom: '15px', padding: '10px', background: '#334', borderRadius: '4px' }}>
                 <p style={{ margin: '0 0 5px 0', fontSize: '0.8rem' }}>{selectedIds.length} objets sélectionnés</p>
@@ -795,7 +820,7 @@ export default function App() {
         <Scene 
           pieces={pieces} 
           setPieces={setPieces} 
-          saveHistory={saveHistory} // On passe la fonction de sauvegarde
+          saveHistory={saveHistory} 
           currentMat={currentMat} 
           currentShape={currentShape} 
           rotation={rotation}
