@@ -5,7 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 import * as THREE from 'three';
 
 // --- 0. VERSIONNING ---
-const APP_VERSION = "v0.6.0 (Parts List)";
+const APP_VERSION = "v0.7.0 (Real Dimensions)";
 
 // --- 1. CONFIGURATION MATÉRIAUX ---
 const MATERIALS = {
@@ -18,12 +18,14 @@ const MATERIALS = {
   roof:   { color: '#8B0000', name: 'Tuile' },
 };
 
-// --- 2. CONFIGURATION DES FORMES ---
+// --- 2. CONFIGURATION DES FORMES (NORMALISÉES) ---
+// heightBase est maintenant toujours 1 pour simplifier le calcul mental
+// defaultScale définit la forme initiale quand on clique sur le bouton
 const SHAPES = {
-  cube: { name: 'Cube', heightBase: 1 },
-  slab: { name: 'Dalle (0.5)', heightBase: 0.5 },
-  column: { name: 'Colonne', heightBase: 1 },
-  slope: { name: 'Toit (Prisme)', heightBase: 1 },
+  cube:   { name: 'Cube',          heightBase: 1, defaultScale: [1, 1, 1] },
+  slab:   { name: 'Dalle',         heightBase: 1, defaultScale: [1, 0.5, 1] }, // C'est ici qu'on définit que c'est plat par défaut
+  column: { name: 'Colonne',       heightBase: 1, defaultScale: [1, 1, 1] },
+  slope:  { name: 'Toit (Prisme)', heightBase: 1, defaultScale: [1, 1, 1] },
 };
 
 // --- UTILITAIRES ---
@@ -32,6 +34,7 @@ const getScale = (s) => Array.isArray(s) ? s : [1, 1, 1];
 
 const createPrismGeometry = () => {
   const shape = new THREE.Shape();
+  // Triangle de 1x1 centré
   shape.moveTo(-0.5, -0.5);
   shape.lineTo(0.5, -0.5);
   shape.lineTo(-0.5, 0.5);
@@ -52,9 +55,10 @@ function ShapeVisual({ shape, color, opacity = 1, isSelected, scale = [1,1,1] })
   });
 
   const geometry = useMemo(() => {
+    // TOUT EST NORMALISÉ SUR UNE BASE DE 1 MÈTRE
     if (shape === 'column') return new THREE.CylinderGeometry(0.5, 0.5, 1, 32);
-    if (shape === 'slab') return new THREE.BoxGeometry(1, 0.5, 1);
     if (shape === 'slope') return createPrismGeometry();
+    // Cube et Dalle partagent la même géométrie Box(1,1,1), seule l'échelle change
     return new THREE.BoxGeometry(1, 1, 1);
   }, [shape]);
 
@@ -71,13 +75,13 @@ function ShapeVisual({ shape, color, opacity = 1, isSelected, scale = [1,1,1] })
   );
 }
 
-// --- GUIDE DE PLACEMENT ---
+// --- GUIDE DE PLACEMENT (LASER) ---
 function PlacementGuide({ position, boxSize }) {
     if (!position) return null;
     return (
-        <group>
-            <line>
-                <bufferGeometry attach="geometry" >
+        <group position={[position[0], 0, position[2]]}>
+            <line position={[-position[0], 0, -position[2]]}>
+                <bufferGeometry>
                     <float32BufferAttribute 
                         attach="attributes-position" 
                         count={2} 
@@ -87,14 +91,22 @@ function PlacementGuide({ position, boxSize }) {
                 </bufferGeometry>
                 <lineBasicMaterial attach="material" color="yellow" opacity={0.6} transparent />
             </line>
-            <mesh position={[position[0], 0.02, position[2]]} rotation={[-Math.PI/2, 0, 0]}>
-                <planeGeometry args={[boxSize.x || 1, boxSize.z || 1]} />
+            <mesh 
+                position={[0, 0.02, 0]} 
+                rotation={[-Math.PI/2, 0, 0]}
+                scale={[boxSize.x || 1, boxSize.z || 1, 1]} 
+            >
+                <planeGeometry args={[1, 1]} /> 
                 <meshBasicMaterial color="yellow" opacity={0.3} transparent />
-                <lineSegments>
-                    <edgesGeometry args={[new THREE.PlaneGeometry(boxSize.x || 1, boxSize.z || 1)]} />
-                    <lineBasicMaterial color="yellow" />
-                </lineSegments>
             </mesh>
+            <lineSegments 
+                position={[0, 0.02, 0]} 
+                rotation={[-Math.PI/2, 0, 0]}
+                scale={[boxSize.x || 1, boxSize.z || 1, 1]}
+            >
+                <edgesGeometry args={[new THREE.PlaneGeometry(1, 1)]} />
+                <lineBasicMaterial color="yellow" />
+            </lineSegments>
         </group>
     );
 }
@@ -398,8 +410,6 @@ export default function App() {
   const [selectedIds, setSelectedIds] = useState([]);
   const [savedGroups, setSavedGroups] = useState([]); 
   const [currentGroup, setCurrentGroup] = useState(null);
-  
-  // NOUVEAU : État pour afficher la liste
   const [showPartList, setShowPartList] = useState(false);
   
   const fileInputRef = useRef(null);
@@ -442,26 +452,15 @@ export default function App() {
       if (selectedIds.length === 0) return;
       const name = prompt("Nom de la structure (ex: Portique) ?");
       if (!name) return;
-
       const selectedPieces = pieces.filter(p => selectedIds.includes(p.id));
       const hasGroups = selectedPieces.some(p => p.isGroup);
       if (hasGroups) { alert("Impossible de grouper des groupes."); return; }
-
       selectedPieces.sort((a, b) => a.position[1] - b.position[1]);
       const pivotBlock = selectedPieces[0];
-      
       const blocksData = selectedPieces.map(p => ({
-          type: p.type,
-          shape: p.shape,
-          rotation: p.rotation,
-          scale: p.scale,
-          relPos: [
-              p.position[0] - pivotBlock.position[0],
-              p.position[1] - pivotBlock.position[1],
-              p.position[2] - pivotBlock.position[2]
-          ]
+          type: p.type, shape: p.shape, rotation: p.rotation, scale: p.scale,
+          relPos: [p.position[0] - pivotBlock.position[0], p.position[1] - pivotBlock.position[1], p.position[2] - pivotBlock.position[2]]
       }));
-
       const newGroup = { id: uuidv4(), name: name, blocks: blocksData };
       setSavedGroups([...savedGroups, newGroup]);
       setPieces(prev => prev.filter(p => !selectedIds.includes(p.id)));
@@ -475,10 +474,17 @@ export default function App() {
       setAppMode('BUILD');
   };
 
+  // FIX : APPLIQUER LES PRESETS
   const selectSimpleBlock = (mat, shape) => {
       setCurrentGroup(null);
       if(mat) setCurrentMat(mat);
-      if(shape) setCurrentShape(shape);
+      if(shape) {
+          setCurrentShape(shape);
+          // On applique l'échelle par défaut pour cette forme (ex: 0.5 pour la dalle)
+          if (SHAPES[shape]?.defaultScale) {
+              setCurrentScale([...SHAPES[shape].defaultScale]);
+          }
+      }
   };
 
   const updateScale = (axis, val) => {
@@ -492,7 +498,7 @@ export default function App() {
     const blob = new Blob([data], { type: 'application/json' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    link.download = `temple-v6-${new Date().toISOString().slice(0,10)}.json`;
+    link.download = `temple-v7-${new Date().toISOString().slice(0,10)}.json`;
     link.click();
   };
 
@@ -510,23 +516,19 @@ export default function App() {
     reader.readAsText(file);
   };
 
-  // --- CALCULATEUR DE DÉBIT (BILL OF MATERIALS) ---
+  // CALCULATEUR EXACT
   const partsList = useMemo(() => {
     const inventory = {};
-
-    // Fonction pour ajouter un bloc à l'inventaire
     const addToInventory = (type, shape, scale) => {
         const baseH = SHAPES[shape]?.heightBase || 1;
         const scl = getScale(scale);
         
-        // Dimensions finales
+        // Dimensions finales (1 unité = 1 mètre/cm)
         const dimX = scl[0];
         const dimY = baseH * scl[1];
         const dimZ = scl[2];
 
-        // Clé unique pour grouper
         const key = `${type}|${shape}|${dimX}x${dimY}x${dimZ}`;
-        
         if (!inventory[key]) {
             inventory[key] = {
                 material: MATERIALS[type]?.name || type,
@@ -540,10 +542,8 @@ export default function App() {
 
     pieces.forEach(p => {
         if (p.isGroup && p.structureData) {
-            // Pour un groupe, on ajoute chaque sous-bloc
             p.structureData.blocks.forEach(b => addToInventory(b.type, b.shape, b.scale));
         } else {
-            // Bloc simple
             addToInventory(p.type, p.shape, p.scale);
         }
     });
@@ -554,7 +554,6 @@ export default function App() {
   return (
     <div style={{ width: '100vw', height: '100vh', position: 'relative' }}>
       
-      {/* --- UI PRINCIPALE --- */}
       <div style={{ position: 'absolute', top: 20, left: 20, zIndex: 10, background: 'rgba(0,0,0,0.85)', padding: '15px', borderRadius: '8px', color: 'white', maxWidth: '220px', maxHeight: '90vh', overflowY: 'auto' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '10px' }}>
             <h1 style={{ margin: 0, fontSize: '1.2rem' }}>🏛️ Architecte</h1>
@@ -574,7 +573,6 @@ export default function App() {
             style={{ padding: '8px', cursor: 'pointer', background: appMode === 'VIEW' ? '#9E9E9E' : '#444', color: 'white', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}>
             👀 VUE (Echap)
             </button>
-             {/* NOUVEAU BOUTON */}
             <button onClick={() => setShowPartList(!showPartList)}
             style={{ padding: '8px', cursor: 'pointer', background: '#FF9800', color: 'white', border: 'none', borderRadius: '4px', fontWeight: 'bold', marginTop:'5px' }}>
             📜 LISTE PIÈCES
@@ -609,12 +607,6 @@ export default function App() {
                     style={{width:'50px', padding:'4px', borderRadius:'4px', border:'none'}} title="Hauteur (Y)" />
                 <input type="number" step="0.5" value={currentScale[2]} onChange={(e) => updateScale(2, e.target.value)} 
                     style={{width:'50px', padding:'4px', borderRadius:'4px', border:'none'}} title="Profondeur (Z)" />
-            </div>
-            
-            <div style={{ fontSize: '0.75rem', color: '#ccc', margin: '5px 0', fontStyle: 'italic' }}>
-               <p>🔄 <strong>R</strong> : Pivoter (Y)</p>
-               <p>↕️ <strong>T</strong> : Basculer (X)</p>
-               <p>↔️ <strong>G</strong> : Basculer (Z)</p>
             </div>
           </>
         )}
@@ -660,7 +652,6 @@ export default function App() {
         <input type="file" ref={fileInputRef} style={{ display: 'none' }} onChange={loadTemple} accept=".json" />
       </div>
 
-      {/* --- MODALE LISTE DES PIÈCES --- */}
       {showPartList && (
           <div style={{
               position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
@@ -672,7 +663,6 @@ export default function App() {
                   <h2 style={{margin:0, fontSize:'1.2rem'}}>📜 Débit Matériaux</h2>
                   <button onClick={() => setShowPartList(false)} style={{background:'transparent', border:'none', color:'white', fontSize:'1.2rem', cursor:'pointer'}}>✖️</button>
               </div>
-              
               <table style={{width:'100%', borderCollapse:'collapse', fontSize:'0.9rem'}}>
                   <thead>
                       <tr style={{borderBottom:'1px solid #555', textAlign:'left'}}>
@@ -697,9 +687,6 @@ export default function App() {
                       {partsList.length === 0 && <tr><td colSpan="3" style={{padding:'20px', textAlign:'center', color:'#666'}}>Aucune pièce posée.</td></tr>}
                   </tbody>
               </table>
-              <div style={{marginTop:'15px', fontSize:'0.7rem', color:'#888', fontStyle:'italic'}}>
-                  * Les dimensions (Largeur x Hauteur x Profondeur) sont les cotes de découpe du bloc brut.
-              </div>
           </div>
       )}
 
