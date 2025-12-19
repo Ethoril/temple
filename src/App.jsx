@@ -1,11 +1,11 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls, Sky, Grid } from '@react-three/drei';
 import { v4 as uuidv4 } from 'uuid';
 import * as THREE from 'three';
 
 // --- 0. VERSIONNING ---
-const APP_VERSION = "v0.7.0 (Real Dimensions)";
+const APP_VERSION = "v0.8.0 (Undo & Precision)";
 
 // --- 1. CONFIGURATION MATÉRIAUX ---
 const MATERIALS = {
@@ -19,11 +19,9 @@ const MATERIALS = {
 };
 
 // --- 2. CONFIGURATION DES FORMES (NORMALISÉES) ---
-// heightBase est maintenant toujours 1 pour simplifier le calcul mental
-// defaultScale définit la forme initiale quand on clique sur le bouton
 const SHAPES = {
   cube:   { name: 'Cube',          heightBase: 1, defaultScale: [1, 1, 1] },
-  slab:   { name: 'Dalle',         heightBase: 1, defaultScale: [1, 0.5, 1] }, // C'est ici qu'on définit que c'est plat par défaut
+  slab:   { name: 'Dalle',         heightBase: 1, defaultScale: [1, 0.5, 1] },
   column: { name: 'Colonne',       heightBase: 1, defaultScale: [1, 1, 1] },
   slope:  { name: 'Toit (Prisme)', heightBase: 1, defaultScale: [1, 1, 1] },
 };
@@ -34,7 +32,6 @@ const getScale = (s) => Array.isArray(s) ? s : [1, 1, 1];
 
 const createPrismGeometry = () => {
   const shape = new THREE.Shape();
-  // Triangle de 1x1 centré
   shape.moveTo(-0.5, -0.5);
   shape.lineTo(0.5, -0.5);
   shape.lineTo(-0.5, 0.5);
@@ -55,10 +52,8 @@ function ShapeVisual({ shape, color, opacity = 1, isSelected, scale = [1,1,1] })
   });
 
   const geometry = useMemo(() => {
-    // TOUT EST NORMALISÉ SUR UNE BASE DE 1 MÈTRE
     if (shape === 'column') return new THREE.CylinderGeometry(0.5, 0.5, 1, 32);
     if (shape === 'slope') return createPrismGeometry();
-    // Cube et Dalle partagent la même géométrie Box(1,1,1), seule l'échelle change
     return new THREE.BoxGeometry(1, 1, 1);
   }, [shape]);
 
@@ -108,6 +103,31 @@ function PlacementGuide({ position, boxSize }) {
                 <lineBasicMaterial color="yellow" />
             </lineSegments>
         </group>
+    );
+}
+
+// --- NOUVEAU : SURLIGNEUR DE FACE CIBLÉE ---
+// C'est ça qui va te dire "Je suis prêt à poser sur CETTE face"
+function FaceHighlighter({ targetInfo }) {
+    if (!targetInfo || !targetInfo.normal || !targetInfo.point) return null;
+
+    const { point, normal } = targetInfo;
+    
+    // On décale très légèrement le quad par rapport à la face pour éviter le z-fighting
+    const position = point.clone().add(normal.clone().multiplyScalar(0.01));
+
+    // On doit orienter le quad pour qu'il soit parallèle à la face
+    const quaternion = new THREE.Quaternion();
+    // Le plan de base regarde vers Z+ (0,0,1). On doit le tourner vers la normale.
+    if (normal.length() > 0) {
+        quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+    }
+
+    return (
+        <mesh position={position} quaternion={quaternion}>
+            <planeGeometry args={[0.5, 0.5]} /> {/* Petit carré de 50cm */}
+            <meshBasicMaterial color="red" opacity={0.5} transparent side={THREE.DoubleSide} />
+        </mesh>
     );
 }
 
@@ -164,7 +184,10 @@ function Piece({ data, onRemove, onClickAdd, onHover, onGrab, onSelect, isSelect
              position: data.position,
              scale: data.isGroup ? [1,1,1] : scl,
              shape: data.isGroup ? 'group' : data.shape,
-             isGroup: data.isGroup
+             isGroup: data.isGroup,
+             // On passe le point précis et la normale pour le Highlighter
+             point: e.point,
+             normal: e.face.normal
           });
       }
   };
@@ -222,7 +245,8 @@ function Piece({ data, onRemove, onClickAdd, onHover, onGrab, onSelect, isSelect
 
 // --- SCÈNE ---
 function Scene({ 
-  pieces, setPieces, 
+  pieces, setPieces, // setPieces sera maintenant wrapper par l'historique
+  saveHistory, // Fonction pour sauvegarder l'état AVANT modif
   currentMat, currentShape, rotation, setRotation, currentScale,
   appMode, selectedIds, setSelectedIds,
   onGrabBlock,
@@ -230,6 +254,7 @@ function Scene({
 }) {
   const [hoverPos, setHoverPos] = useState(null);
   const [guideSize, setGuideSize] = useState({x:1, z:1});
+  const [targetInfo, setTargetInfo] = useState(null); // Pour le FaceHighlighter
 
   useEffect(() => {
     const handleInput = (e) => {
@@ -241,10 +266,13 @@ function Scene({
     return () => window.removeEventListener('keydown', handleInput);
   }, [setRotation]);
 
-  useEffect(() => { if (appMode !== 'BUILD') setHoverPos(null); }, [appMode]);
+  useEffect(() => { if (appMode !== 'BUILD') { setHoverPos(null); setTargetInfo(null); } }, [appMode]);
 
   const addBlock = () => {
     if (!hoverPos || appMode !== 'BUILD') return;
+    
+    // SAUVEGARDE HISTO
+    saveHistory();
 
     if (currentGroup) {
         const newGroupPiece = {
@@ -256,7 +284,7 @@ function Scene({
             type: 'structure',
             name: currentGroup.name
         };
-        setPieces([...pieces, newGroupPiece]);
+        setPieces(prev => [...prev, newGroupPiece]);
         return;
     }
 
@@ -268,12 +296,14 @@ function Scene({
       rotation: rotation,
       scale: currentScale
     };
-    setPieces([...pieces, newPiece]);
+    setPieces(prev => [...prev, newPiece]);
   };
 
-  const onMouseMove = (e, targetInfo = null) => {
+  const onMouseMove = (e, tInfo = null) => {
     if (appMode !== 'BUILD') return;
     e.stopPropagation();
+    
+    setTargetInfo(tInfo); // On stocke l'info pour le highlighter rouge
 
     let myHeight = 0;
     let myWidthX = 1;
@@ -305,18 +335,24 @@ function Scene({
 
     if (e.object.name === "ground") {
         contactY = 0;
-    } else if (targetInfo) {
+    } else if (tInfo) {
         const normal = e.face.normal;
+        // LOGIQUE RENFORCÉE : On regarde la normale
         if (normal.y > 0.5) {
+             // Face du HAUT
              contactY = e.point.y; 
+        } else if (normal.y < -0.5) {
+             // Face du BAS (si on construit sous un truc flottant)
+             // contactY serait le bas de l'objet, moins ma hauteur... mais restons simple
+             const neighborCenterY = tInfo.position[1];
+             contactY = neighborCenterY; // Simplification
         } else {
-             const neighborCenterY = targetInfo.position[1];
+             // Face LATÉRALE
+             const neighborCenterY = tInfo.position[1];
              let neighborHeight = 1;
-             if (!targetInfo.isGroup) {
-                 const nBase = SHAPES[targetInfo.shape]?.heightBase || 1;
-                 neighborHeight = nBase * targetInfo.scale[1];
-             } else {
-                 neighborHeight = 1; 
+             if (!tInfo.isGroup) {
+                 const nBase = SHAPES[tInfo.shape]?.heightBase || 1;
+                 neighborHeight = nBase * tInfo.scale[1];
              }
              contactY = neighborCenterY - (neighborHeight / 2);
         }
@@ -329,7 +365,7 @@ function Scene({
     const finalZ = Math.round(idealZ * 2) / 2;
     
     let finalY = contactY + yOffset;
-    if (targetInfo && normal.y > 0.5) finalY -= 0.002; 
+    if (tInfo && normal.y > 0.5) finalY -= 0.002; 
     else finalY = Math.round(finalY * 4) / 4;
 
     setHoverPos([finalX, finalY, finalZ]);
@@ -368,6 +404,11 @@ function Scene({
       {appMode === 'BUILD' && hoverPos && (
           <PlacementGuide position={hoverPos} boxSize={guideSize} />
       )}
+      
+      {/* VISUEL D'AIDE ROUGE */}
+      {appMode === 'BUILD' && targetInfo && (
+          <FaceHighlighter targetInfo={targetInfo} />
+      )}
 
       {appMode === 'BUILD' && hoverPos && (
         <GhostPiece 
@@ -385,7 +426,7 @@ function Scene({
             key={piece.id} 
             data={piece} 
             appMode={appMode}
-            onRemove={(id) => setPieces(prev => prev.filter(p => p.id !== id))}
+            onRemove={(id) => { saveHistory(); setPieces(prev => prev.filter(p => p.id !== id)); }}
             onClickAdd={() => addBlock()} 
             onHover={onMouseMove}
             onGrab={onGrabBlock}
@@ -401,6 +442,60 @@ function Scene({
 export default function App() {
   const [pieces, setPieces] = useState([]);
   
+  // --- HISTORIQUE (Undo/Redo) ---
+  const [history, setHistory] = useState([]);
+  const [future, setFuture] = useState([]);
+
+  // Fonction pour sauvegarder l'état actuel AVANT une modif
+  const saveHistory = useCallback(() => {
+    setHistory(prev => {
+        const newHist = [...prev, pieces];
+        // On limite l'historique à 50 étapes pour la mémoire
+        if (newHist.length > 50) newHist.shift(); 
+        return newHist;
+    });
+    setFuture([]); // Quand on fait une nouvelle action, on efface le futur alternatif
+  }, [pieces]);
+
+  const undo = useCallback(() => {
+      if (history.length === 0) return;
+      const previous = history[history.length - 1];
+      setFuture(prev => [pieces, ...prev]); // On sauvegarde le présent dans le futur
+      setPieces(previous);
+      setHistory(prev => prev.slice(0, -1)); // On retire le dernier état
+  }, [history, pieces]);
+
+  const redo = useCallback(() => {
+      if (future.length === 0) return;
+      const next = future[0];
+      setHistory(prev => [...prev, pieces]); // On sauvegarde le présent dans le passé
+      setPieces(next);
+      setFuture(prev => prev.slice(1));
+  }, [future, pieces]);
+
+  // --- SHORTCUTS CLAVIER ---
+  useEffect(() => {
+      const handleUndoRedoKeys = (e) => {
+          // CTRL + Z
+          if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+              if (e.shiftKey) {
+                  redo(); // Ctrl + Shift + Z
+              } else {
+                  undo(); // Ctrl + Z
+              }
+              e.preventDefault();
+          }
+          // CTRL + Y (Redo standard Windows)
+          if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+              redo();
+              e.preventDefault();
+          }
+      };
+      window.addEventListener('keydown', handleUndoRedoKeys);
+      return () => window.removeEventListener('keydown', handleUndoRedoKeys);
+  }, [undo, redo]);
+
+  // États standards
   const [currentMat, setCurrentMat] = useState('stone');
   const [currentShape, setCurrentShape] = useState('cube');
   const [rotation, setRotation] = useState([0, 0, 0]);
@@ -423,9 +518,10 @@ export default function App() {
       };
       window.addEventListener('keydown', handleGlobalKeys);
       return () => window.removeEventListener('keydown', handleGlobalKeys);
-  }, [selectedIds, appMode]);
+  }, [selectedIds, appMode]); // Attention, j'ai enlevé deleteSelection des deps ici pour éviter boucle, on utilise la réf
 
   const handleGrabBlock = (blockData) => {
+    saveHistory(); // On sauvegarde avant de "voler" le bloc
     setPieces((prev) => prev.filter(p => p.id !== blockData.id));
     if (blockData.isGroup) {
         setCurrentGroup(blockData.structureData);
@@ -443,6 +539,7 @@ export default function App() {
   const deleteSelection = () => {
       if (selectedIds.length === 0) return;
       if (confirm(`Supprimer ${selectedIds.length} objets ?`)) {
+          saveHistory();
           setPieces(prev => prev.filter(p => !selectedIds.includes(p.id)));
           setSelectedIds([]);
       }
@@ -455,6 +552,9 @@ export default function App() {
       const selectedPieces = pieces.filter(p => selectedIds.includes(p.id));
       const hasGroups = selectedPieces.some(p => p.isGroup);
       if (hasGroups) { alert("Impossible de grouper des groupes."); return; }
+      
+      saveHistory(); // Sauvegarde avant transformation
+      
       selectedPieces.sort((a, b) => a.position[1] - b.position[1]);
       const pivotBlock = selectedPieces[0];
       const blocksData = selectedPieces.map(p => ({
@@ -474,13 +574,11 @@ export default function App() {
       setAppMode('BUILD');
   };
 
-  // FIX : APPLIQUER LES PRESETS
   const selectSimpleBlock = (mat, shape) => {
       setCurrentGroup(null);
       if(mat) setCurrentMat(mat);
       if(shape) {
           setCurrentShape(shape);
-          // On applique l'échelle par défaut pour cette forme (ex: 0.5 pour la dalle)
           if (SHAPES[shape]?.defaultScale) {
               setCurrentScale([...SHAPES[shape].defaultScale]);
           }
@@ -498,7 +596,7 @@ export default function App() {
     const blob = new Blob([data], { type: 'application/json' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    link.download = `temple-v7-${new Date().toISOString().slice(0,10)}.json`;
+    link.download = `temple-v8-${new Date().toISOString().slice(0,10)}.json`;
     link.click();
   };
 
@@ -511,23 +609,21 @@ export default function App() {
             const data = JSON.parse(ev.target.result);
             if (Array.isArray(data)) setPieces(data);
             else { setPieces(data.pieces || []); setSavedGroups(data.savedGroups || []); }
+            setHistory([]); // Reset historique sur nouveau chargement
+            setFuture([]);
         } catch (err) { alert("Erreur fichier"); }
     };
     reader.readAsText(file);
   };
 
-  // CALCULATEUR EXACT
   const partsList = useMemo(() => {
     const inventory = {};
     const addToInventory = (type, shape, scale) => {
         const baseH = SHAPES[shape]?.heightBase || 1;
         const scl = getScale(scale);
-        
-        // Dimensions finales (1 unité = 1 mètre/cm)
         const dimX = scl[0];
         const dimY = baseH * scl[1];
         const dimZ = scl[2];
-
         const key = `${type}|${shape}|${dimX}x${dimY}x${dimZ}`;
         if (!inventory[key]) {
             inventory[key] = {
@@ -539,7 +635,6 @@ export default function App() {
         }
         inventory[key].count++;
     };
-
     pieces.forEach(p => {
         if (p.isGroup && p.structureData) {
             p.structureData.blocks.forEach(b => addToInventory(b.type, b.shape, b.scale));
@@ -547,7 +642,6 @@ export default function App() {
             addToInventory(p.type, p.shape, p.scale);
         }
     });
-
     return Object.values(inventory).sort((a, b) => a.material.localeCompare(b.material));
   }, [pieces]);
 
@@ -561,6 +655,12 @@ export default function App() {
         </div>
         
         <div style={{ display: 'flex', flexDirection: 'column', gap: '5px', marginBottom: '15px' }}>
+            {/* BOUTONS UNDO / REDO VISUELS AUSSI */}
+            <div style={{display:'flex', gap:'5px', marginBottom:'5px'}}>
+                 <button onClick={undo} disabled={history.length===0} style={{flex:1, cursor: history.length>0?'pointer':'not-allowed', opacity:history.length>0?1:0.5, padding:'5px', background:'#444', color:'white', border:'none', borderRadius:'4px'}}>↩ Undo</button>
+                 <button onClick={redo} disabled={future.length===0} style={{flex:1, cursor: future.length>0?'pointer':'not-allowed', opacity:future.length>0?1:0.5, padding:'5px', background:'#444', color:'white', border:'none', borderRadius:'4px'}}>↪ Redo</button>
+            </div>
+
             <button onClick={() => setAppMode('BUILD')}
             style={{ padding: '8px', cursor: 'pointer', background: appMode === 'BUILD' ? '#4CAF50' : '#444', color: 'white', border: 'none', borderRadius: '4px', fontWeight: 'bold' }}>
             🏗️ CONSTRUCTION (C)
@@ -610,7 +710,8 @@ export default function App() {
             </div>
           </>
         )}
-
+        
+        {/* ... (Reste de l'UI Sélection et Structures identique) */}
         {appMode === 'SELECT' && selectedIds.length > 0 && (
             <div style={{ marginBottom: '15px', padding: '10px', background: '#334', borderRadius: '4px' }}>
                 <p style={{ margin: '0 0 5px 0', fontSize: '0.8rem' }}>{selectedIds.length} objets sélectionnés</p>
@@ -647,7 +748,7 @@ export default function App() {
         <div style={{ display: 'flex', gap: '5px', marginTop:'10px', borderTop:'1px solid #444', paddingTop:'10px' }}>
           <button onClick={saveTemple} style={btnStyle('#555')} title="Sauvegarder Projet">💾</button>
           <button onClick={() => fileInputRef.current.click()} style={btnStyle('#555')} title="Charger Projet">📂</button>
-          <button onClick={() => { if(confirm("Vider ?")) setPieces([]); }} style={btnStyle('#f44336')} title="Tout effacer">🗑️</button>
+          <button onClick={() => { if(confirm("Vider ?")) { saveHistory(); setPieces([]); } }} style={btnStyle('#f44336')} title="Tout effacer">🗑️</button>
         </div>
         <input type="file" ref={fileInputRef} style={{ display: 'none' }} onChange={loadTemple} accept=".json" />
       </div>
@@ -694,6 +795,7 @@ export default function App() {
         <Scene 
           pieces={pieces} 
           setPieces={setPieces} 
+          saveHistory={saveHistory} // On passe la fonction de sauvegarde
           currentMat={currentMat} 
           currentShape={currentShape} 
           rotation={rotation}
