@@ -5,7 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 import * as THREE from 'three';
 
 // --- 0. VERSIONNING ---
-const APP_VERSION = "v0.9.1 (Virtual Floor)";
+const APP_VERSION = "v0.9.2 (Ghost Raycast Fix)";
 
 // --- 1. CONFIGURATION MATÉRIAUX ---
 const MATERIALS = {
@@ -42,7 +42,8 @@ const createPrismGeometry = () => {
 };
 
 // --- COMPOSANT VISUEL ---
-function ShapeVisual({ shape, color, opacity = 1, isSelected, scale = [1,1,1] }) {
+// FIX : Ajout de la prop 'isGhost'
+function ShapeVisual({ shape, color, opacity = 1, isSelected, scale = [1,1,1], isGhost = false }) {
   const material = new THREE.MeshStandardMaterial({ 
     color: isSelected ? '#4444ff' : color, 
     emissive: isSelected ? '#0000aa' : '#000000',
@@ -59,7 +60,12 @@ function ShapeVisual({ shape, color, opacity = 1, isSelected, scale = [1,1,1] })
 
   return (
     <group scale={scale}>
-      <mesh geometry={geometry} material={material} />
+      <mesh 
+        geometry={geometry} 
+        material={material} 
+        // C'EST ICI LA MAGIE : Si c'est un fantôme, la souris passe au travers !
+        raycast={isGhost ? null : undefined} 
+      />
       {opacity === 1 && (
         <lineSegments>
           <edgesGeometry args={[geometry]} />
@@ -124,17 +130,21 @@ function FaceHighlighter({ targetInfo }) {
     );
 }
 
-// --- NOUVEAU : PLANCHER VIRTUEL (Pour le Lock) ---
-function VirtualLockPlane({ yLevel, onMove }) {
+// --- PLANCHER VIRTUEL ---
+function VirtualLockPlane({ yLevel, onMove, onClickAdd }) {
     return (
         <mesh 
             rotation={[-Math.PI / 2, 0, 0]} 
             position={[0, yLevel, 0]} 
             onPointerMove={onMove}
-            visible={true} // On le rend visible pour aider l'utilisateur
+            onClick={(e) => {
+                e.stopPropagation();
+                // IMPORTANT : Clic sur le plan virtuel = Poser le bloc
+                if (e.button === 0) onClickAdd();
+            }}
+            visible={true}
         >
             <planeGeometry args={[100, 100]} />
-            {/* Matériau invisible mais qui réagit aux events, avec une grille visuelle */}
             <meshBasicMaterial color="#00FF00" opacity={0.1} transparent side={THREE.DoubleSide} />
             <gridHelper args={[100, 100, '#00FF00', '#00FF00']} rotation={[-Math.PI/2,0,0]} position={[0,0,0.01]} />
         </mesh>
@@ -156,6 +166,7 @@ function GhostPiece({ position, rotation, shape, materialType, groupData, scale 
                         color={MATERIALS[block.type]?.color || 'white'} 
                         opacity={0.5} 
                         scale={getScale(block.scale)}
+                        isGhost={true} // FIX : On le signale
                     />
                 </group>
             ))}
@@ -166,7 +177,7 @@ function GhostPiece({ position, rotation, shape, materialType, groupData, scale 
   const color = MATERIALS[materialType]?.color || 'white';
   return (
     <group position={position} rotation={rot}>
-        <ShapeVisual shape={shape} color={color} opacity={0.5} scale={scl} />
+        <ShapeVisual shape={shape} color={color} opacity={0.5} scale={scl} isGhost={true} />
     </group>
   );
 }
@@ -272,14 +283,7 @@ function Scene({
       if (e.key.toLowerCase() === 't') setRotation(prev => [prev[0] + Math.PI / 2, prev[1], prev[2]]);
       if (e.key.toLowerCase() === 'g') setRotation(prev => [prev[0], prev[1], prev[2] + Math.PI / 2]);
       
-      // LOCK (Shift)
       if (e.key === 'Shift' && hoverPos) {
-          // On calcule l'altitude du "SOL" sous l'objet (Base de l'objet)
-          // hoverPos[1] est le centre. On veut verrouiller la base.
-          // Pour simplifier, on verrouille le hoverPos[1] (centre actuel)
-          // Mais le composant VirtualLockPlane attend une altitude pour le RAYCAST
-          // Le Raycast tape le plan. Le plan doit être à l'altitude où on veut cliquer.
-          // Disons qu'on veut cliquer au niveau du centre de l'objet pour garder la cohérence.
           setLockedY(hoverPos[1]); 
       }
     };
@@ -357,27 +361,19 @@ function Scene({
 
     setGuideSize({x: myWidthX, z: myDepthZ});
 
-    // --- LOGIQUE SHIFT AMÉLIORÉE ---
-    const normal = e.face.normal;
-    let finalX, finalY, finalZ;
-
+    // --- LOGIQUE SHIFT (Avec plan virtuel) ---
     if (lockedY !== null) {
-        // SI VERROUILLÉ : On utilise le point d'impact sur le "Virtual Plane"
-        // Le Virtual Plane est à la hauteur lockedY.
-        // Donc e.point est déjà à la bonne hauteur Y (environ).
-        // On veut juste suivre la souris en X/Z.
-        
-        const idealX = e.point.x;
-        const idealZ = e.point.z;
-        finalX = Math.round(idealX * 2) / 2;
-        finalZ = Math.round(idealZ * 2) / 2;
-        finalY = lockedY; // On force strictement la hauteur verrouillée
+        // En mode Lock, on suit le point d'impact sur le plan virtuel (X/Z)
+        // et on force Y.
+        const finalX = Math.round(e.point.x * 2) / 2;
+        const finalZ = Math.round(e.point.z * 2) / 2;
+        setHoverPos([finalX, lockedY, finalZ]);
     } else {
-        // SINON : Comportement normal (Gravité)
+        const normal = e.face.normal;
         const idealX = e.point.x + (normal.x * (myWidthX/2));
         const idealZ = e.point.z + (normal.z * (myDepthZ/2));
-        finalX = Math.round(idealX * 2) / 2;
-        finalZ = Math.round(idealZ * 2) / 2;
+        const finalX = Math.round(idealX * 2) / 2;
+        const finalZ = Math.round(idealZ * 2) / 2;
 
         const yOffset = myHeight / 2;
         let contactY = 0;
@@ -403,10 +399,8 @@ function Scene({
         if (tInfo && e.face.normal.y > 0.5) calculatedY -= 0.002; 
         else calculatedY = Math.round(calculatedY * 4) / 4;
         
-        finalY = calculatedY;
+        setHoverPos([finalX, calculatedY, finalZ]);
     }
-
-    setHoverPos([finalX, finalY, finalZ]);
   };
 
   const handleSelect = (id) => {
@@ -420,7 +414,6 @@ function Scene({
       <pointLight position={[10, 20, 10]} intensity={1.5} />
       <Sky sunPosition={[100, 20, 100]} />
       
-      {/* SOL */}
       <mesh 
         name="ground"
         rotation={[-Math.PI / 2, 0, 0]} 
@@ -437,20 +430,12 @@ function Scene({
         <meshBasicMaterial visible={false} />
       </mesh>
       
-      {/* PLANCHER VIRTUEL (Seulement si Lock actif) */}
+      {/* PLANCHER VIRTUEL */}
       {lockedY !== null && (
           <VirtualLockPlane 
             yLevel={lockedY} 
-            onMove={(e) => {
-                // On transmet l'événement au handler principal
-                // comme si on touchait un sol normal
-                onMouseMove(e, null);
-            }} 
-            // Clic sur le plan virtuel = Poser le bloc
-            onClick={(e) => {
-                e.stopPropagation();
-                if (appMode === 'BUILD' && e.button === 0) addBlock();
-            }}
+            onMove={(e) => onMouseMove(e, null)} 
+            onClickAdd={addBlock} // On passe la fonction pour cliquer dessus
           />
       )}
       
@@ -493,7 +478,7 @@ function Scene({
   );
 }
 
-// --- APP (Reste inchangé) ---
+// --- APP ---
 export default function App() {
   const [pieces, setPieces] = useState([]);
   const [history, setHistory] = useState([]);
@@ -636,7 +621,7 @@ export default function App() {
     const blob = new Blob([data], { type: 'application/json' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    link.download = `temple-v10-${new Date().toISOString().slice(0,10)}.json`;
+    link.download = `temple-v11-${new Date().toISOString().slice(0,10)}.json`;
     link.click();
   };
 
@@ -755,7 +740,7 @@ export default function App() {
           </>
         )}
         
-        {/* ... (Sélection / Liste / etc.) ... */}
+        {/* ... (UI Reste inchangée) ... */}
         {appMode === 'SELECT' && selectedIds.length > 0 && (
             <div style={{ marginBottom: '15px', padding: '10px', background: '#334', borderRadius: '4px' }}>
                 <p style={{ margin: '0 0 5px 0', fontSize: '0.8rem' }}>{selectedIds.length} objets sélectionnés</p>
